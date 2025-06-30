@@ -21,3 +21,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "Running"
 include(":app")
+include(":running2mobile")
