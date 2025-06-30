@@ -1,0 +1,7 @@
+<resources>
+    <!-- Colores de tu app -->
+    <color name="darkBlue">#0F1C3F</color>
+    <color name="deepPurple">#3A1D6E</color>
+    <color name="accentColor">#00E0FF</color>
+    <color name="successColor">#00FF88</color>
+</resources>
