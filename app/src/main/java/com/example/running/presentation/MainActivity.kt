@@ -43,27 +43,202 @@ import kotlinx.coroutines.delay
 import kotlin.math.abs
 import kotlin.math.min
 
-class MainActivity : ComponentActivity() {
+// Importaciones para Wearable Data Layer
+import com.google.android.gms.wearable.*
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
+import android.util.Log
+// CORRECCIÓN 1: Importar correctamente las extensiones de tasks
+import com.google.android.gms.tasks.Tasks
+import java.util.concurrent.ExecutionException
+
+class MainActivity : ComponentActivity(), DataClient.OnDataChangedListener {
+
+    private lateinit var dataClient: DataClient
+
+    // Agregar esta variable
+    private var updateSharedState: ((Float, Int, Int, Int, Boolean) -> Unit)? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Inicializar el cliente de datos
+        dataClient = Wearable.getDataClient(this)
+
+        // AGREGAR ESTA LÍNEA
+        checkWearableConnection()
+
         setContent {
-            WearApp()
+            WearApp(
+                onGoalAchieved = { sendGoalAchievedToMobile() },
+                onUpdateSharedState = { updateFn ->
+                    updateSharedState = updateFn
+                }
+            )
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        dataClient.addListener(this)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        dataClient.removeListener(this)
+    }
+
+    override fun onDataChanged(dataEventBuffer: DataEventBuffer) {
+        for (event in dataEventBuffer) {
+            if (event.type == DataEvent.TYPE_CHANGED) {
+                val dataItem = event.dataItem
+                when (dataItem.uri.path) {
+                    "/goal_achieved" -> {
+                        val dataMap = DataMapItem.fromDataItem(dataItem).dataMap
+                        val source = dataMap.getString("source")
+                        Log.d("WearOS", "Recibida notificación de meta completada desde: $source")
+
+                        // Usar la función de actualización en lugar de runOnUiThread
+                        updateSharedState?.invoke(0f, 0, 0, 0, true)
+                    }
+                    "/running_stats" -> {
+                        val dataMap = DataMapItem.fromDataItem(dataItem).dataMap
+                        Log.d("WearOS", "Recibidas estadísticas desde móvil")
+
+                        // Usar la función de actualización
+                        updateSharedState?.invoke(
+                            dataMap.getFloat("distance", 0f),
+                            dataMap.getInt("steps", 0),
+                            dataMap.getInt("calories", 0),
+                            dataMap.getInt("time", 0),
+                            false
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun checkWearableConnection() {
+        lifecycleScope.launch {
+            try {
+                val nodes = Tasks.await(Wearable.getNodeClient(this@MainActivity).connectedNodes)
+                if (nodes.isNotEmpty()) {
+                    Log.d("Connection", "Dispositivos conectados: ${nodes.size}")
+                    for (node in nodes) {
+                        Log.d("Connection", "Nodo: ${node.displayName} - ${node.id}")
+                    }
+                } else {
+                    Log.w("Connection", "No hay dispositivos Wear conectados")
+                }
+            } catch (e: Exception) {
+                Log.e("Connection", "Error verificando conexión", e)
+            }
+        }
+    }
+
+    private fun sendStatsToMobile(distance: Float, steps: Int, calories: Int, time: Int) {
+        lifecycleScope.launch {
+            try {
+                val putDataRequest = PutDataMapRequest.create("/running_stats").run {
+                    dataMap.putLong("timestamp", System.currentTimeMillis())
+                    dataMap.putString("source", "wear")
+                    dataMap.putFloat("distance", distance)
+                    dataMap.putInt("steps", steps)
+                    dataMap.putInt("calories", calories)
+                    dataMap.putInt("time", time)
+                    asPutDataRequest()
+                }
+
+                val result = Tasks.await(dataClient.putDataItem(putDataRequest))
+                Log.d("WearOS", "Estadísticas enviadas a móvil: ${result.uri}")
+            } catch (e: Exception) {
+                Log.e("WearOS", "Error enviando estadísticas a móvil", e)
+            }
+        }
+    }
+
+    private fun sendGoalAchievedToMobile() {
+        lifecycleScope.launch {
+            try {
+                val putDataRequest = PutDataMapRequest.create("/goal_achieved").run {
+                    dataMap.putLong("timestamp", System.currentTimeMillis())
+                    dataMap.putString("source", "wear")
+                    dataMap.putString("message", "Meta completada desde WearOS")
+                    asPutDataRequest()
+                }
+
+                // CORRECCIÓN 2: Usar Tasks.await en lugar de .await()
+                val result = Tasks.await(dataClient.putDataItem(putDataRequest))
+                Log.d("WearOS", "Datos enviados a móvil: ${result.uri}")
+            } catch (e: ExecutionException) {
+                Log.e("WearOS", "Error enviando datos a móvil", e)
+            } catch (e: InterruptedException) {
+                Log.e("WearOS", "Error enviando datos a móvil", e)
+            } catch (e: Exception) {
+                Log.e("WearOS", "Error enviando datos a móvil", e)
+            }
         }
     }
 }
 
 @Composable
-fun WearApp() {
+fun WearApp(
+    onGoalAchieved: () -> Unit = {},
+    onUpdateSharedState: ((Float, Int, Int, Int, Boolean) -> Unit) -> Unit = {}
+) {
     var currentScreen by remember { mutableStateOf("main") }
 
+    // MOVER ESTAS VARIABLES AQUÍ (desde la clase MainActivity)
+    var sharedDistance by remember { mutableStateOf(0f) }
+    var sharedSteps by remember { mutableStateOf(0) }
+    var sharedCalories by remember { mutableStateOf(0) }
+    var sharedTime by remember { mutableStateOf(0) }
+    var sharedGoalAchieved by remember { mutableStateOf(false) }
+
+    // Función para enviar estadísticas
+    val sendStatsToMobile = { distance: Float, steps: Int, calories: Int, time: Int ->
+        // Esta función se implementará más adelante
+    }
+
+    // Configurar la función de actualización
+    LaunchedEffect(Unit) {
+        onUpdateSharedState { distance, steps, calories, time, goalAchieved ->
+            sharedDistance = distance
+            sharedSteps = steps
+            sharedCalories = calories
+            sharedTime = time
+            sharedGoalAchieved = goalAchieved
+        }
+    }
+
     when (currentScreen) {
-        "main" -> MainScreen(onNavigateToSecond = { currentScreen = "second" })
-        "second" -> SecondScreen(onNavigateBack = { currentScreen = "main" })
+        "main" -> MainScreen(
+            onNavigateToSecond = { currentScreen = "second" },
+            onGoalAchieved = onGoalAchieved,
+            sharedDistance = sharedDistance,
+            sharedSteps = sharedSteps,
+            sharedCalories = sharedCalories,
+            sharedTime = sharedTime,
+            sharedGoalAchieved = sharedGoalAchieved,
+            onSendStats = sendStatsToMobile
+        )
+        "second" -> SecondScreenWear(onNavigateBack = { currentScreen = "main" })
     }
 }
 
 @Composable
-fun MainScreen(onNavigateToSecond: () -> Unit) {
+fun MainScreen(
+    onNavigateToSecond: () -> Unit,
+    onGoalAchieved: () -> Unit = {},
+    // AGREGAR ESTOS PARÁMETROS
+    sharedDistance: Float = 0f,
+    sharedSteps: Int = 0,
+    sharedCalories: Int = 0,
+    sharedTime: Int = 0,
+    sharedGoalAchieved: Boolean = false,
+    onSendStats: (Float, Int, Int, Int) -> Unit = { _, _, _, _ -> }
+) {
     var isRunning by remember { mutableStateOf(false) }
     var distance by remember { mutableStateOf(0f) }
     var totalTime by remember { mutableStateOf(0) } // en segundos
@@ -100,6 +275,7 @@ fun MainScreen(onNavigateToSecond: () -> Unit) {
             if (distance >= dailyGoal && !goalAchieved) {
                 goalAchieved = true
                 showGoalAchievedAlert = true
+                onGoalAchieved() // Enviar notificación al móvil
             }
         }
     }
@@ -114,6 +290,25 @@ fun MainScreen(onNavigateToSecond: () -> Unit) {
             }
         }
     }
+
+    // AGREGAR ESTE LaunchedEffect DESPUÉS DE LAS OTRAS LaunchedEffect
+    LaunchedEffect(sharedGoalAchieved) {
+        if (sharedGoalAchieved && !goalAchieved) {
+            showGoalAchievedAlert = true
+            delay(3000) // Mostrar por 3 segundos
+            showGoalAchievedAlert = false
+        }
+    }
+
+    // AGREGAR ESTE LaunchedEffect PARA ENVIAR ESTADÍSTICAS CADA 5 SEGUNDOS
+        LaunchedEffect(isRunning, distance, steps, calories, totalTime) {
+            if (isRunning) {
+                while (isRunning) {
+                    delay(5000) // Enviar cada 5 segundos
+                    onSendStats(distance, steps, calories, totalTime)
+                }
+            }
+        }
 
     // Calcular valores derivados
     val progress = min(distance / dailyGoal, 1.0f)
@@ -189,23 +384,23 @@ fun MainScreen(onNavigateToSecond: () -> Unit) {
                         modifier = Modifier.padding(top = 20.dp, bottom = 2.dp)
                     )
 
-                    // Indicador circular de progreso con ritmo cardíaco - MÁS COMPACTO
+                    // Indicador circular de progreso con ritmo cardíaco
                     Box(
                         contentAlignment = Alignment.Center,
                         modifier = Modifier.padding(vertical = 4.dp)
                     ) {
                         CircularProgressIndicator(
-                            modifier = Modifier.size(95.dp), // Reducido de 150dp
+                            modifier = Modifier.size(95.dp),
                             progress = progress,
                             startAngle = 0f,
                             endAngle = 360f,
                             indicatorColor = if (goalAchieved) successColor else accentColor,
                             trackColor = textColor.copy(alpha = 0.1f),
-                            strokeWidth = 6.dp // Reducido de 8dp
+                            strokeWidth = 6.dp
                         )
 
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            // Distancia con "km" al lado - MÁS COMPACTO
+                            // Distancia con "km" al lado
                             Row(
                                 verticalAlignment = Alignment.Bottom,
                                 horizontalArrangement = Arrangement.Center
@@ -213,7 +408,7 @@ fun MainScreen(onNavigateToSecond: () -> Unit) {
                                 Text(
                                     text = "%.2f".format(distance),
                                     color = textColor,
-                                    fontSize = 20.sp, // Reducido de 24sp
+                                    fontSize = 20.sp,
                                     fontWeight = FontWeight.Bold
                                 )
                                 Text(
@@ -224,7 +419,7 @@ fun MainScreen(onNavigateToSecond: () -> Unit) {
                                 )
                             }
 
-                            // Valor del ritmo cardíaco - MÁS COMPACTO
+                            // Valor del ritmo cardíaco
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier.padding(top = 1.dp)
@@ -237,31 +432,31 @@ fun MainScreen(onNavigateToSecond: () -> Unit) {
                                 Text(
                                     text = "$heartRate",
                                     color = textColor,
-                                    fontSize = 12.sp, // Reducido de 14sp
+                                    fontSize = 12.sp,
                                     fontWeight = FontWeight.Medium
                                 )
                             }
                         }
                     }
 
-                    // Estadísticas secundarias (4 columnas) - MÁS COMPACTAS
+                    // Estadísticas secundarias (4 columnas)
                     Row(
                         horizontalArrangement = Arrangement.SpaceEvenly,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 2.dp, vertical = 6.dp) // Reducido padding
+                            .padding(horizontal = 2.dp, vertical = 6.dp)
                     ) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Text(
                                 text = timeFormatted,
                                 color = textColor,
-                                fontSize = 12.sp, // Reducido de 14sp
+                                fontSize = 12.sp,
                                 fontWeight = FontWeight.Medium
                             )
                             Text(
                                 text = "Tiempo",
                                 color = textColor.copy(alpha = 0.7f),
-                                fontSize = 8.sp // Reducido de 10sp
+                                fontSize = 8.sp
                             )
                         }
 
@@ -269,13 +464,13 @@ fun MainScreen(onNavigateToSecond: () -> Unit) {
                             Text(
                                 text = pace,
                                 color = textColor,
-                                fontSize = 12.sp, // Reducido de 14sp
+                                fontSize = 12.sp,
                                 fontWeight = FontWeight.Medium
                             )
                             Text(
                                 text = "Ritmo",
                                 color = textColor.copy(alpha = 0.7f),
-                                fontSize = 8.sp // Reducido de 10sp
+                                fontSize = 8.sp
                             )
                         }
 
@@ -283,13 +478,13 @@ fun MainScreen(onNavigateToSecond: () -> Unit) {
                             Text(
                                 text = "$calories",
                                 color = textColor,
-                                fontSize = 12.sp, // Reducido de 14sp
+                                fontSize = 12.sp,
                                 fontWeight = FontWeight.Medium
                             )
                             Text(
                                 text = "Calorías",
                                 color = textColor.copy(alpha = 0.7f),
-                                fontSize = 8.sp // Reducido de 10sp
+                                fontSize = 8.sp
                             )
                         }
 
@@ -297,13 +492,13 @@ fun MainScreen(onNavigateToSecond: () -> Unit) {
                             Text(
                                 text = "$steps",
                                 color = textColor,
-                                fontSize = 12.sp, // Reducido de 14sp
+                                fontSize = 12.sp,
                                 fontWeight = FontWeight.Medium
                             )
                             Text(
                                 text = "Pasos",
                                 color = textColor.copy(alpha = 0.7f),
-                                fontSize = 8.sp // Reducido de 10sp
+                                fontSize = 8.sp
                             )
                         }
                     }
@@ -341,6 +536,7 @@ fun MainScreen(onNavigateToSecond: () -> Unit) {
                                 if (!goalAchieved) {
                                     goalAchieved = true
                                     showGoalAchievedAlert = true
+                                    onGoalAchieved() // Enviar notificación al móvil
                                 }
                             },
                             colors = ButtonDefaults.buttonColors(
@@ -386,12 +582,12 @@ fun MainScreen(onNavigateToSecond: () -> Unit) {
                 }
             }
 
-            // Alerta de meta alcanzada - AHORA ESTÁ AL FINAL PARA QUE SE SUPERPONGA
+            // Alerta de meta alcanzada
             if (showGoalAchievedAlert) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.85f)), // Fondo más oscuro
+                        .background(Color.Black.copy(alpha = 0.85f)),
                     contentAlignment = Alignment.Center
                 ) {
                     // Card/Container para la alerta
@@ -439,6 +635,61 @@ fun MainScreen(onNavigateToSecond: () -> Unit) {
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+// CORRECCIÓN 4: Renombrar SecondScreen para evitar conflicto
+@Composable
+fun SecondScreenWear(onNavigateBack: () -> Unit) {
+    // Implementación básica de la segunda pantalla
+    val darkBlue = Color(0xFF0F1C3F)
+    val deepPurple = Color(0xFF3A1D6E)
+    val textColor = Color.White
+
+    RunningTheme {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(darkBlue, deepPurple)
+                    )
+                )
+                .pointerInput(Unit) {
+                    detectDragGestures { _, dragAmount ->
+                        // Detectar deslizamiento hacia la derecha para volver
+                        if (dragAmount.x > 50 && abs(dragAmount.y) < 100) {
+                            onNavigateBack()
+                        }
+                    }
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Text(
+                    text = "📊",
+                    fontSize = 40.sp,
+                    modifier = Modifier.padding(bottom = 16.dp)
+                )
+                Text(
+                    text = "Segunda Pantalla",
+                    color = textColor,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center
+                )
+                Text(
+                    text = "Desliza hacia la derecha para volver",
+                    color = textColor.copy(alpha = 0.7f),
+                    fontSize = 12.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
             }
         }
     }

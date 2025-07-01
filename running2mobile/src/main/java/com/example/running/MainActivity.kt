@@ -26,13 +26,146 @@ import com.example.running.ui.theme.RunningTheme
 import kotlinx.coroutines.delay
 import kotlin.math.min
 
-class MainActivity : ComponentActivity() {
+// Importaciones para Wearable Data Layer
+import com.google.android.gms.wearable.*
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
+import android.util.Log
+// CORRECCIÓN: Usar Tasks.await en lugar de kotlinx.coroutines.tasks.await
+import com.google.android.gms.tasks.Tasks
+import java.util.concurrent.ExecutionException
+
+class MainActivity : ComponentActivity(), DataClient.OnDataChangedListener {
+
+    private lateinit var dataClient: DataClient
+
+    // POR ESTO:
+    internal var _sharedDistance = mutableStateOf(0f)
+    internal var _sharedSteps = mutableStateOf(0)
+    internal var _sharedCalories = mutableStateOf(0)
+    internal var _sharedTime = mutableStateOf(0)
+    internal var _sharedGoalAchieved = mutableStateOf(false)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // Inicializar el cliente de datos
+        dataClient = Wearable.getDataClient(this)
+
+        // AGREGAR ESTA LÍNEA
+        checkWearableConnection()
+
         setContent {
             RunningTheme {
-                RunningMobileApp()
+                RunningMobileApp(
+                    onGoalAchieved = { sendGoalAchievedToWear() },
+                    activity = this@MainActivity
+                )
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        dataClient.addListener(this)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        dataClient.removeListener(this)
+    }
+
+    override fun onDataChanged(dataEventBuffer: DataEventBuffer) {
+        for (event in dataEventBuffer) {
+            if (event.type == DataEvent.TYPE_CHANGED) {
+                val dataItem = event.dataItem
+                when (dataItem.uri.path) {
+                    "/goal_achieved" -> {
+                        val dataMap = DataMapItem.fromDataItem(dataItem).dataMap
+                        val source = dataMap.getString("source")
+                        Log.d("Mobile", "Recibida notificación de meta completada desde: $source")
+
+                        // Actualizar estado compartido
+                        runOnUiThread {
+                            _sharedGoalAchieved.value = true
+                        }
+                    }
+                    "/running_stats" -> {
+                        val dataMap = DataMapItem.fromDataItem(dataItem).dataMap
+                        Log.d("Mobile", "Recibidas estadísticas desde WearOS")
+
+                        // Actualizar estadísticas compartidas
+                        runOnUiThread {
+                            _sharedDistance.value = dataMap.getFloat("distance", 0f)
+                            _sharedSteps.value = dataMap.getInt("steps", 0)
+                            _sharedCalories.value = dataMap.getInt("calories", 0)
+                            _sharedTime.value = dataMap.getInt("time", 0)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun checkWearableConnection() {
+        lifecycleScope.launch {
+            try {
+                val nodes = Tasks.await(Wearable.getNodeClient(this@MainActivity).connectedNodes)
+                if (nodes.isNotEmpty()) {
+                    Log.d("Connection", "Dispositivos conectados: ${nodes.size}")
+                    for (node in nodes) {
+                        Log.d("Connection", "Nodo: ${node.displayName} - ${node.id}")
+                    }
+                } else {
+                    Log.w("Connection", "No hay dispositivos Wear conectados")
+                }
+            } catch (e: Exception) {
+                Log.e("Connection", "Error verificando conexión", e)
+            }
+        }
+    }
+
+    internal fun sendStatsToWear(distance: Float, steps: Int, calories: Int, time: Int) {
+        lifecycleScope.launch {
+            try {
+                val putDataRequest = PutDataMapRequest.create("/running_stats").run {
+                    dataMap.putLong("timestamp", System.currentTimeMillis())
+                    dataMap.putString("source", "mobile")
+                    dataMap.putFloat("distance", distance)
+                    dataMap.putInt("steps", steps)
+                    dataMap.putInt("calories", calories)
+                    dataMap.putInt("time", time)
+                    asPutDataRequest()
+                }
+
+                val result = Tasks.await(dataClient.putDataItem(putDataRequest))
+                Log.d("Mobile", "Estadísticas enviadas a WearOS: ${result.uri}")
+            } catch (e: Exception) {
+                Log.e("Mobile", "Error enviando estadísticas a WearOS", e)
+            }
+        }
+    }
+
+    private fun sendGoalAchievedToWear() {
+        lifecycleScope.launch {
+            try {
+                val putDataRequest = PutDataMapRequest.create("/goal_achieved").run {
+                    dataMap.putLong("timestamp", System.currentTimeMillis())
+                    dataMap.putString("source", "mobile")
+                    dataMap.putString("message", "Meta completada desde móvil")
+                    asPutDataRequest()
+                }
+
+                // CORRECCIÓN: Usar Tasks.await() en lugar de .await()
+                val result = Tasks.await(dataClient.putDataItem(putDataRequest))
+                Log.d("Mobile", "Datos enviados a WearOS: ${result.uri}")
+            } catch (e: ExecutionException) {
+                Log.e("Mobile", "Error enviando datos a WearOS", e)
+            } catch (e: InterruptedException) {
+                Log.e("Mobile", "Error enviando datos a WearOS", e)
+            } catch (e: Exception) {
+                Log.e("Mobile", "Error enviando datos a WearOS", e)
             }
         }
     }
@@ -40,7 +173,10 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun RunningMobileApp() {
+fun RunningMobileApp(
+    onGoalAchieved: () -> Unit = {},
+    activity: MainActivity? = null
+) {
     var currentScreen by remember { mutableStateOf("main") }
 
     // Colores personalizados
@@ -113,7 +249,16 @@ fun RunningMobileApp() {
                 darkBlue = darkBlue,
                 deepPurple = deepPurple,
                 accentColor = accentColor,
-                successColor = successColor
+                successColor = successColor,
+                onGoalAchieved = onGoalAchieved,
+                sharedDistance = activity?._sharedDistance?.value ?: 0f,
+                sharedSteps = activity?._sharedSteps?.value ?: 0,
+                sharedCalories = activity?._sharedCalories?.value ?: 0,
+                sharedTime = activity?._sharedTime?.value ?: 0,
+                sharedGoalAchieved = activity?._sharedGoalAchieved?.value ?: false,
+                onSendStats = { distance, steps, calories, time ->
+                    activity?.sendStatsToWear(distance, steps, calories, time)
+                }
             )
             "history" -> HistoryScreen(
                 paddingValues = paddingValues,
@@ -133,7 +278,15 @@ fun MainScreen(
     darkBlue: Color,
     deepPurple: Color,
     accentColor: Color,
-    successColor: Color
+    successColor: Color,
+    onGoalAchieved: () -> Unit = {},
+    // AGREGAR ESTOS PARÁMETROS
+    sharedDistance: Float = 0f,
+    sharedSteps: Int = 0,
+    sharedCalories: Int = 0,
+    sharedTime: Int = 0,
+    sharedGoalAchieved: Boolean = false,
+    onSendStats: (Float, Int, Int, Int) -> Unit = { _, _, _, _ -> }
 ) {
     var isRunning by remember { mutableStateOf(false) }
     var distance by remember { mutableStateOf(0f) }
@@ -159,6 +312,7 @@ fun MainScreen(
             if (distance >= dailyGoal && !goalAchieved) {
                 goalAchieved = true
                 showGoalAchievedAlert = true
+                onGoalAchieved() // Enviar notificación al WearOS
             }
         }
     }
@@ -171,6 +325,43 @@ fun MainScreen(
             }
         }
     }
+
+    // LaunchedEffect para mostrar alerta cuando se reciba notificación
+    LaunchedEffect(sharedGoalAchieved) {
+        if (sharedGoalAchieved && !goalAchieved) {
+            showGoalAchievedAlert = true
+            delay(3000) // Mostrar por 3 segundos
+            showGoalAchievedAlert = false
+        }
+    }
+
+    // LaunchedEffect para enviar estadísticas cada 5 segundos
+        LaunchedEffect(isRunning, distance, steps, calories, totalTime) {
+            if (isRunning) {
+                while (isRunning) {
+                    delay(5000) // Enviar cada 5 segundos
+                    onSendStats(distance, steps, calories, totalTime)
+                }
+            }
+        }
+
+    // LaunchedEffect para mostrar estadísticas sincronizadas
+        LaunchedEffect(sharedDistance, sharedSteps, sharedCalories, sharedTime) {
+            // Opcional: Puedes decidir si quieres mostrar las estadísticas compartidas
+            // o mantener las locales. Aquí las combinamos:
+            if (sharedDistance > distance && !isRunning) {
+                distance = sharedDistance
+            }
+            if (sharedSteps > steps && !isRunning) {
+                steps = sharedSteps
+            }
+            if (sharedCalories > calories && !isRunning) {
+                calories = sharedCalories
+            }
+            if (sharedTime > totalTime && !isRunning) {
+                totalTime = sharedTime
+            }
+        }
 
     val progress = min(distance / dailyGoal, 1.0f)
     val progressPercentage = (progress * 100).toInt()
@@ -443,6 +634,7 @@ fun MainScreen(
                                 if (!goalAchieved) {
                                     goalAchieved = true
                                     showGoalAchievedAlert = true
+                                    onGoalAchieved() // Enviar notificación al WearOS
                                 }
                             },
                             colors = ButtonDefaults.buttonColors(
@@ -812,6 +1004,6 @@ fun HistoryScreen(
 @Composable
 fun RunningMobileAppPreview() {
     RunningTheme {
-        RunningMobileApp()
+        RunningMobileApp(activity = null)
     }
 }
